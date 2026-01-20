@@ -18,9 +18,6 @@ env:
   NAMESPACE: creditcard
   OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
   OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
-  DB_USERNAME: dbadmin
-  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-  POSTGRES_IMAGE: registry.redhat.io/rhel9/postgresql-15:latest
 
 jobs:
   redeploy-databases:
@@ -54,20 +51,45 @@ jobs:
           sleep 20
           echo "✓ Cleanup complete"
 
+      - name: Create Secrets
+        run: |
+          oc create secret generic creditcard-card-db-secret \
+            --from-literal=database-name=carddb \
+            --from-literal=database-user=dbadmin \
+            --from-literal=database-password='${{ secrets.DB_PASSWORD }}' \
+            -n ${{ env.NAMESPACE }} --dry-run=client -o yaml | oc apply -f -
+          
+          oc create secret generic creditcard-account-db-secret \
+            --from-literal=database-name=accountdb \
+            --from-literal=database-user=dbadmin \
+            --from-literal=database-password='${{ secrets.DB_PASSWORD }}' \
+            -n ${{ env.NAMESPACE }} --dry-run=client -o yaml | oc apply -f -
+          
+          oc create secret generic creditcard-statement-db-secret \
+            --from-literal=database-name=statementdb \
+            --from-literal=database-user=dbadmin \
+            --from-literal=database-password='${{ secrets.DB_PASSWORD }}' \
+            -n ${{ env.NAMESPACE }} --dry-run=client -o yaml | oc apply -f -
+          
+          oc create secret generic creditcard-payment-db-secret \
+            --from-literal=database-name=paymentdb \
+            --from-literal=database-user=dbadmin \
+            --from-literal=database-password='${{ secrets.DB_PASSWORD }}' \
+            -n ${{ env.NAMESPACE }} --dry-run=client -o yaml | oc apply -f -
+          
+          echo "✓ Secrets created"
+
+      - name: Verify Secrets
+        run: |
+          echo "=== Verifying Secrets ==="
+          for db in card account statement payment; do
+            echo "--- creditcard-${db}-db-secret ---"
+            oc get secret creditcard-${db}-db-secret -n ${{ env.NAMESPACE }} -o jsonpath='{.data}' | echo "Keys: $(cat)"
+          done
+
       - name: Deploy Card Database
         run: |
           cat <<'EOF' | oc apply -f -
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: creditcard-card-db-secret
-            namespace: creditcard
-          type: Opaque
-          stringData:
-            database-name: carddb
-            database-user: dbadmin
-            database-password: ${{ env.DB_PASSWORD }}
-          ---
           apiVersion: v1
           kind: PersistentVolumeClaim
           metadata:
@@ -167,17 +189,6 @@ jobs:
         run: |
           cat <<'EOF' | oc apply -f -
           apiVersion: v1
-          kind: Secret
-          metadata:
-            name: creditcard-account-db-secret
-            namespace: creditcard
-          type: Opaque
-          stringData:
-            database-name: accountdb
-            database-user: dbadmin
-            database-password: ${{ env.DB_PASSWORD }}
-          ---
-          apiVersion: v1
           kind: PersistentVolumeClaim
           metadata:
             name: creditcard-account-db-pvc
@@ -276,17 +287,6 @@ jobs:
         run: |
           cat <<'EOF' | oc apply -f -
           apiVersion: v1
-          kind: Secret
-          metadata:
-            name: creditcard-statement-db-secret
-            namespace: creditcard
-          type: Opaque
-          stringData:
-            database-name: statementdb
-            database-user: dbadmin
-            database-password: ${{ env.DB_PASSWORD }}
-          ---
-          apiVersion: v1
           kind: PersistentVolumeClaim
           metadata:
             name: creditcard-statement-db-pvc
@@ -384,17 +384,6 @@ jobs:
       - name: Deploy Payment Database
         run: |
           cat <<'EOF' | oc apply -f -
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: creditcard-payment-db-secret
-            namespace: creditcard
-          type: Opaque
-          stringData:
-            database-name: paymentdb
-            database-user: dbadmin
-            database-password: ${{ env.DB_PASSWORD }}
-          ---
           apiVersion: v1
           kind: PersistentVolumeClaim
           metadata:
@@ -498,7 +487,7 @@ jobs:
             echo "Waiting for creditcard-${db}-db..."
             oc rollout status deployment/creditcard-${db}-db -n ${{ env.NAMESPACE }} --timeout=300s || {
               echo "⚠ Checking creditcard-${db}-db status..."
-              oc get pods -l app=creditcard-${db}-db -n ${{ env.NAMESPACE }}
+              oc describe pod -l app=creditcard-${db}-db -n ${{ env.NAMESPACE }} | tail -30
               oc logs -l app=creditcard-${db}-db -n ${{ env.NAMESPACE }} --tail=50 || true
             }
           done
@@ -519,27 +508,6 @@ jobs:
           echo "| Statement | creditcard-statement-db | statementdb | dbadmin | 5432 |" >> $GITHUB_STEP_SUMMARY
           echo "| Payment | creditcard-payment-db | paymentdb | dbadmin | 5432 |" >> $GITHUB_STEP_SUMMARY
 
-  deploy-databases:
-    runs-on: ubuntu-latest
-    if: ${{ github.event.inputs.action == 'deploy' }}
-    
-    steps:
-      - name: Install OpenShift CLI
-        run: |
-          curl -sLO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz
-          tar -xzf openshift-client-linux.tar.gz
-          sudo mv oc kubectl /usr/local/bin/
-
-      - name: Login to OpenShift
-        run: |
-          oc login --token=${{ env.OPENSHIFT_TOKEN }} --server=${{ env.OPENSHIFT_SERVER }} --insecure-skip-tls-verify=true
-          oc project ${{ env.NAMESPACE }} || oc new-project ${{ env.NAMESPACE }}
-
-      - name: Deploy all databases
-        run: |
-          echo "Use 'redeploy' action for fresh deployment"
-          echo "Use 'delete' first if you need to change existing resources"
-
   status-databases:
     runs-on: ubuntu-latest
     if: ${{ github.event.inputs.action == 'status' }}
@@ -558,13 +526,25 @@ jobs:
 
       - name: Check status
         run: |
-          echo "=== All Resources ==="
-          oc get pvc,deployment,pod,svc -n ${{ env.NAMESPACE }}
+          echo "=== Secrets ==="
+          oc get secrets -n ${{ env.NAMESPACE }} | grep db
           echo ""
-          echo "=== Pod Logs ==="
+          echo "=== PVCs ==="
+          oc get pvc -n ${{ env.NAMESPACE }}
+          echo ""
+          echo "=== Deployments ==="
+          oc get deployments -n ${{ env.NAMESPACE }}
+          echo ""
+          echo "=== Pods ==="
+          oc get pods -n ${{ env.NAMESPACE }} -o wide
+          echo ""
+          echo "=== Services ==="
+          oc get services -n ${{ env.NAMESPACE }}
+          echo ""
+          echo "=== Pod Events ==="
           for db in card account statement payment; do
             echo "--- creditcard-${db}-db ---"
-            oc logs -l app=creditcard-${db}-db -n ${{ env.NAMESPACE }} --tail=30 2>/dev/null || echo "No logs"
+            oc describe pod -l app=creditcard-${db}-db -n ${{ env.NAMESPACE }} 2>/dev/null | tail -20 || echo "No pod found"
           done
 
   delete-databases:
@@ -593,3 +573,13 @@ jobs:
             oc delete secret creditcard-${db}-db-secret -n ${{ env.NAMESPACE }} --ignore-not-found=true
           done
           echo "✓ All databases deleted"
+
+  deploy-databases:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'deploy' }}
+    
+    steps:
+      - name: Info
+        run: |
+          echo "Please use 'redeploy' action for fresh deployment"
+          echo "Or use 'delete' first, then 'deploy'"
