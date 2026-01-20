@@ -1,0 +1,595 @@
+name: Deploy PostgreSQL Databases to ROSA
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - delete
+          - status
+          - redeploy
+
+env:
+  NAMESPACE: creditcard
+  OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
+  OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+  DB_USERNAME: dbadmin
+  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+  POSTGRES_IMAGE: registry.redhat.io/rhel9/postgresql-15:latest
+
+jobs:
+  redeploy-databases:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'redeploy' }}
+    
+    steps:
+      - name: Install OpenShift CLI
+        run: |
+          curl -sLO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz
+          tar -xzf openshift-client-linux.tar.gz
+          sudo mv oc kubectl /usr/local/bin/
+          oc version --client
+
+      - name: Login to OpenShift
+        run: |
+          oc login --token=${{ env.OPENSHIFT_TOKEN }} --server=${{ env.OPENSHIFT_SERVER }} --insecure-skip-tls-verify=true
+          oc project ${{ env.NAMESPACE }} || oc new-project ${{ env.NAMESPACE }}
+
+      - name: Delete existing databases
+        run: |
+          echo "Cleaning up existing database resources..."
+          for db in card account statement payment; do
+            echo "Deleting creditcard-${db}-db resources..."
+            oc delete deployment creditcard-${db}-db -n ${{ env.NAMESPACE }} --ignore-not-found=true
+            oc delete service creditcard-${db}-db -n ${{ env.NAMESPACE }} --ignore-not-found=true
+            oc delete pvc creditcard-${db}-db-pvc -n ${{ env.NAMESPACE }} --ignore-not-found=true --wait=true
+            oc delete secret creditcard-${db}-db-secret -n ${{ env.NAMESPACE }} --ignore-not-found=true
+          done
+          echo "Waiting for resources to be fully deleted..."
+          sleep 20
+          echo "✓ Cleanup complete"
+
+      - name: Deploy Card Database
+        run: |
+          cat <<'EOF' | oc apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: creditcard-card-db-secret
+            namespace: creditcard
+          type: Opaque
+          stringData:
+            database-name: carddb
+            database-user: dbadmin
+            database-password: ${{ env.DB_PASSWORD }}
+          ---
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: creditcard-card-db-pvc
+            namespace: creditcard
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 5Gi
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: creditcard-card-db
+            namespace: creditcard
+            labels:
+              app: creditcard-card-db
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: creditcard-card-db
+            strategy:
+              type: Recreate
+            template:
+              metadata:
+                labels:
+                  app: creditcard-card-db
+              spec:
+                containers:
+                  - name: postgresql
+                    image: registry.redhat.io/rhel9/postgresql-15:latest
+                    ports:
+                      - containerPort: 5432
+                    env:
+                      - name: POSTGRESQL_DATABASE
+                        valueFrom:
+                          secretKeyRef:
+                            name: creditcard-card-db-secret
+                            key: database-name
+                      - name: POSTGRESQL_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: creditcard-card-db-secret
+                            key: database-user
+                      - name: POSTGRESQL_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: creditcard-card-db-secret
+                            key: database-password
+                    volumeMounts:
+                      - name: postgres-storage
+                        mountPath: /var/lib/pgsql/data
+                    resources:
+                      requests:
+                        memory: "256Mi"
+                        cpu: "100m"
+                      limits:
+                        memory: "512Mi"
+                        cpu: "500m"
+                    readinessProbe:
+                      exec:
+                        command:
+                          - /usr/libexec/check-container
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    livenessProbe:
+                      exec:
+                        command:
+                          - /usr/libexec/check-container
+                          - --live
+                      initialDelaySeconds: 120
+                      periodSeconds: 10
+                volumes:
+                  - name: postgres-storage
+                    persistentVolumeClaim:
+                      claimName: creditcard-card-db-pvc
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: creditcard-card-db
+            namespace: creditcard
+          spec:
+            type: ClusterIP
+            ports:
+              - port: 5432
+                targetPort: 5432
+            selector:
+              app: creditcard-card-db
+          EOF
+          echo "✓ Card database deployed"
+
+      - name: Deploy Account Database
+        run: |
+          cat <<'EOF' | oc apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: creditcard-account-db-secret
+            namespace: creditcard
+          type: Opaque
+          stringData:
+            database-name: accountdb
+            database-user: dbadmin
+            database-password: ${{ env.DB_PASSWORD }}
+          ---
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: creditcard-account-db-pvc
+            namespace: creditcard
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 5Gi
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: creditcard-account-db
+            namespace: creditcard
+            labels:
+              app: creditcard-account-db
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: creditcard-account-db
+            strategy:
+              type: Recreate
+            template:
+              metadata:
+                labels:
+                  app: creditcard-account-db
+              spec:
+                containers:
+                  - name: postgresql
+                    image: registry.redhat.io/rhel9/postgresql-15:latest
+                    ports:
+                      - containerPort: 5432
+                    env:
+                      - name: POSTGRESQL_DATABASE
+                        valueFrom:
+                          secretKeyRef:
+                            name: creditcard-account-db-secret
+                            key: database-name
+                      - name: POSTGRESQL_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: creditcard-account-db-secret
+                            key: database-user
+                      - name: POSTGRESQL_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: creditcard-account-db-secret
+                            key: database-password
+                    volumeMounts:
+                      - name: postgres-storage
+                        mountPath: /var/lib/pgsql/data
+                    resources:
+                      requests:
+                        memory: "256Mi"
+                        cpu: "100m"
+                      limits:
+                        memory: "512Mi"
+                        cpu: "500m"
+                    readinessProbe:
+                      exec:
+                        command:
+                          - /usr/libexec/check-container
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    livenessProbe:
+                      exec:
+                        command:
+                          - /usr/libexec/check-container
+                          - --live
+                      initialDelaySeconds: 120
+                      periodSeconds: 10
+                volumes:
+                  - name: postgres-storage
+                    persistentVolumeClaim:
+                      claimName: creditcard-account-db-pvc
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: creditcard-account-db
+            namespace: creditcard
+          spec:
+            type: ClusterIP
+            ports:
+              - port: 5432
+                targetPort: 5432
+            selector:
+              app: creditcard-account-db
+          EOF
+          echo "✓ Account database deployed"
+
+      - name: Deploy Statement Database
+        run: |
+          cat <<'EOF' | oc apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: creditcard-statement-db-secret
+            namespace: creditcard
+          type: Opaque
+          stringData:
+            database-name: statementdb
+            database-user: dbadmin
+            database-password: ${{ env.DB_PASSWORD }}
+          ---
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: creditcard-statement-db-pvc
+            namespace: creditcard
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 5Gi
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: creditcard-statement-db
+            namespace: creditcard
+            labels:
+              app: creditcard-statement-db
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: creditcard-statement-db
+            strategy:
+              type: Recreate
+            template:
+              metadata:
+                labels:
+                  app: creditcard-statement-db
+              spec:
+                containers:
+                  - name: postgresql
+                    image: registry.redhat.io/rhel9/postgresql-15:latest
+                    ports:
+                      - containerPort: 5432
+                    env:
+                      - name: POSTGRESQL_DATABASE
+                        valueFrom:
+                          secretKeyRef:
+                            name: creditcard-statement-db-secret
+                            key: database-name
+                      - name: POSTGRESQL_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: creditcard-statement-db-secret
+                            key: database-user
+                      - name: POSTGRESQL_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: creditcard-statement-db-secret
+                            key: database-password
+                    volumeMounts:
+                      - name: postgres-storage
+                        mountPath: /var/lib/pgsql/data
+                    resources:
+                      requests:
+                        memory: "256Mi"
+                        cpu: "100m"
+                      limits:
+                        memory: "512Mi"
+                        cpu: "500m"
+                    readinessProbe:
+                      exec:
+                        command:
+                          - /usr/libexec/check-container
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    livenessProbe:
+                      exec:
+                        command:
+                          - /usr/libexec/check-container
+                          - --live
+                      initialDelaySeconds: 120
+                      periodSeconds: 10
+                volumes:
+                  - name: postgres-storage
+                    persistentVolumeClaim:
+                      claimName: creditcard-statement-db-pvc
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: creditcard-statement-db
+            namespace: creditcard
+          spec:
+            type: ClusterIP
+            ports:
+              - port: 5432
+                targetPort: 5432
+            selector:
+              app: creditcard-statement-db
+          EOF
+          echo "✓ Statement database deployed"
+
+      - name: Deploy Payment Database
+        run: |
+          cat <<'EOF' | oc apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: creditcard-payment-db-secret
+            namespace: creditcard
+          type: Opaque
+          stringData:
+            database-name: paymentdb
+            database-user: dbadmin
+            database-password: ${{ env.DB_PASSWORD }}
+          ---
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: creditcard-payment-db-pvc
+            namespace: creditcard
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 5Gi
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: creditcard-payment-db
+            namespace: creditcard
+            labels:
+              app: creditcard-payment-db
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: creditcard-payment-db
+            strategy:
+              type: Recreate
+            template:
+              metadata:
+                labels:
+                  app: creditcard-payment-db
+              spec:
+                containers:
+                  - name: postgresql
+                    image: registry.redhat.io/rhel9/postgresql-15:latest
+                    ports:
+                      - containerPort: 5432
+                    env:
+                      - name: POSTGRESQL_DATABASE
+                        valueFrom:
+                          secretKeyRef:
+                            name: creditcard-payment-db-secret
+                            key: database-name
+                      - name: POSTGRESQL_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: creditcard-payment-db-secret
+                            key: database-user
+                      - name: POSTGRESQL_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: creditcard-payment-db-secret
+                            key: database-password
+                    volumeMounts:
+                      - name: postgres-storage
+                        mountPath: /var/lib/pgsql/data
+                    resources:
+                      requests:
+                        memory: "256Mi"
+                        cpu: "100m"
+                      limits:
+                        memory: "512Mi"
+                        cpu: "500m"
+                    readinessProbe:
+                      exec:
+                        command:
+                          - /usr/libexec/check-container
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                    livenessProbe:
+                      exec:
+                        command:
+                          - /usr/libexec/check-container
+                          - --live
+                      initialDelaySeconds: 120
+                      periodSeconds: 10
+                volumes:
+                  - name: postgres-storage
+                    persistentVolumeClaim:
+                      claimName: creditcard-payment-db-pvc
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: creditcard-payment-db
+            namespace: creditcard
+          spec:
+            type: ClusterIP
+            ports:
+              - port: 5432
+                targetPort: 5432
+            selector:
+              app: creditcard-payment-db
+          EOF
+          echo "✓ Payment database deployed"
+
+      - name: Wait for databases to be ready
+        run: |
+          echo "Waiting for database pods to be ready..."
+          sleep 30
+          for db in card account statement payment; do
+            echo "Waiting for creditcard-${db}-db..."
+            oc rollout status deployment/creditcard-${db}-db -n ${{ env.NAMESPACE }} --timeout=300s || {
+              echo "⚠ Checking creditcard-${db}-db status..."
+              oc get pods -l app=creditcard-${db}-db -n ${{ env.NAMESPACE }}
+              oc logs -l app=creditcard-${db}-db -n ${{ env.NAMESPACE }} --tail=50 || true
+            }
+          done
+
+      - name: Show final status
+        run: |
+          echo "=== Final Status ==="
+          oc get pvc,deployment,pod,svc -n ${{ env.NAMESPACE }}
+
+      - name: Summary
+        run: |
+          echo "## Database Redeployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Database | Host | DB Name | User | Port |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|------|---------|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Card | creditcard-card-db | carddb | dbadmin | 5432 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Account | creditcard-account-db | accountdb | dbadmin | 5432 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Statement | creditcard-statement-db | statementdb | dbadmin | 5432 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Payment | creditcard-payment-db | paymentdb | dbadmin | 5432 |" >> $GITHUB_STEP_SUMMARY
+
+  deploy-databases:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'deploy' }}
+    
+    steps:
+      - name: Install OpenShift CLI
+        run: |
+          curl -sLO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz
+          tar -xzf openshift-client-linux.tar.gz
+          sudo mv oc kubectl /usr/local/bin/
+
+      - name: Login to OpenShift
+        run: |
+          oc login --token=${{ env.OPENSHIFT_TOKEN }} --server=${{ env.OPENSHIFT_SERVER }} --insecure-skip-tls-verify=true
+          oc project ${{ env.NAMESPACE }} || oc new-project ${{ env.NAMESPACE }}
+
+      - name: Deploy all databases
+        run: |
+          echo "Use 'redeploy' action for fresh deployment"
+          echo "Use 'delete' first if you need to change existing resources"
+
+  status-databases:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'status' }}
+    
+    steps:
+      - name: Install OpenShift CLI
+        run: |
+          curl -sLO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz
+          tar -xzf openshift-client-linux.tar.gz
+          sudo mv oc kubectl /usr/local/bin/
+
+      - name: Login to OpenShift
+        run: |
+          oc login --token=${{ env.OPENSHIFT_TOKEN }} --server=${{ env.OPENSHIFT_SERVER }} --insecure-skip-tls-verify=true
+          oc project ${{ env.NAMESPACE }}
+
+      - name: Check status
+        run: |
+          echo "=== All Resources ==="
+          oc get pvc,deployment,pod,svc -n ${{ env.NAMESPACE }}
+          echo ""
+          echo "=== Pod Logs ==="
+          for db in card account statement payment; do
+            echo "--- creditcard-${db}-db ---"
+            oc logs -l app=creditcard-${db}-db -n ${{ env.NAMESPACE }} --tail=30 2>/dev/null || echo "No logs"
+          done
+
+  delete-databases:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'delete' }}
+    
+    steps:
+      - name: Install OpenShift CLI
+        run: |
+          curl -sLO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz
+          tar -xzf openshift-client-linux.tar.gz
+          sudo mv oc kubectl /usr/local/bin/
+
+      - name: Login to OpenShift
+        run: |
+          oc login --token=${{ env.OPENSHIFT_TOKEN }} --server=${{ env.OPENSHIFT_SERVER }} --insecure-skip-tls-verify=true
+          oc project ${{ env.NAMESPACE }}
+
+      - name: Delete all databases
+        run: |
+          for db in card account statement payment; do
+            echo "Deleting creditcard-${db}-db..."
+            oc delete deployment creditcard-${db}-db -n ${{ env.NAMESPACE }} --ignore-not-found=true
+            oc delete service creditcard-${db}-db -n ${{ env.NAMESPACE }} --ignore-not-found=true
+            oc delete pvc creditcard-${db}-db-pvc -n ${{ env.NAMESPACE }} --ignore-not-found=true --wait=true
+            oc delete secret creditcard-${db}-db-secret -n ${{ env.NAMESPACE }} --ignore-not-found=true
+          done
+          echo "✓ All databases deleted"
