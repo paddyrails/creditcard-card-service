@@ -11,12 +11,13 @@ on:
         options:
           - deploy
           - delete
+          - status
 
 env:
   NAMESPACE: creditcard
   OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
   OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
-  DB_USERNAME: postgres
+  DB_USERNAME: dbadmin
   DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
 jobs:
@@ -41,6 +42,14 @@ jobs:
           oc get namespace ${{ env.NAMESPACE }} || oc create namespace ${{ env.NAMESPACE }}
           oc project ${{ env.NAMESPACE }}
 
+      - name: Check available storage classes
+        run: |
+          echo "=== Available Storage Classes ==="
+          oc get storageclass
+          echo ""
+          DEFAULT_SC=$(oc get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}')
+          echo "Default Storage Class: ${DEFAULT_SC:-'None found'}"
+
       - name: Deploy Card Database
         run: |
           cat <<EOF | oc apply -f -
@@ -52,9 +61,9 @@ jobs:
             namespace: ${{ env.NAMESPACE }}
           type: Opaque
           stringData:
-            POSTGRES_DB: carddb
-            POSTGRES_USER: ${{ env.DB_USERNAME }}
-            POSTGRES_PASSWORD: ${{ env.DB_PASSWORD }}
+            database-name: carddb
+            database-user: ${{ env.DB_USERNAME }}
+            database-password: ${{ env.DB_PASSWORD }}
           ---
           apiVersion: v1
           kind: PersistentVolumeClaim
@@ -66,7 +75,7 @@ jobs:
               - ReadWriteOnce
             resources:
               requests:
-                storage: 5Gi
+                storage: 1Gi
           ---
           apiVersion: apps/v1
           kind: Deployment
@@ -80,35 +89,37 @@ jobs:
             selector:
               matchLabels:
                 app: creditcard-card-db
+            strategy:
+              type: Recreate
             template:
               metadata:
                 labels:
                   app: creditcard-card-db
               spec:
                 containers:
-                  - name: postgres
-                    image: postgres:15
+                  - name: postgresql
+                    image: bitnami/postgresql:15
                     ports:
                       - containerPort: 5432
                     env:
-                      - name: POSTGRES_DB
+                      - name: POSTGRESQL_DATABASE
                         valueFrom:
                           secretKeyRef:
                             name: creditcard-card-db-secret
-                            key: POSTGRES_DB
-                      - name: POSTGRES_USER
+                            key: database-name
+                      - name: POSTGRESQL_USERNAME
                         valueFrom:
                           secretKeyRef:
                             name: creditcard-card-db-secret
-                            key: POSTGRES_USER
-                      - name: POSTGRES_PASSWORD
+                            key: database-user
+                      - name: POSTGRESQL_PASSWORD
                         valueFrom:
                           secretKeyRef:
                             name: creditcard-card-db-secret
-                            key: POSTGRES_PASSWORD
+                            key: database-password
                     volumeMounts:
                       - name: postgres-storage
-                        mountPath: /var/lib/postgresql/data
+                        mountPath: /bitnami/postgresql
                     resources:
                       requests:
                         memory: "256Mi"
@@ -116,22 +127,24 @@ jobs:
                       limits:
                         memory: "512Mi"
                         cpu: "500m"
-                    livenessProbe:
-                      exec:
-                        command:
-                          - pg_isready
-                          - -U
-                          - postgres
-                      initialDelaySeconds: 30
-                      periodSeconds: 10
                     readinessProbe:
                       exec:
                         command:
-                          - pg_isready
-                          - -U
-                          - postgres
-                      initialDelaySeconds: 5
-                      periodSeconds: 5
+                          - /bin/sh
+                          - -c
+                          - pg_isready -U ${{ env.DB_USERNAME }} -d carddb
+                      initialDelaySeconds: 30
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                    livenessProbe:
+                      exec:
+                        command:
+                          - /bin/sh
+                          - -c
+                          - pg_isready -U ${{ env.DB_USERNAME }} -d carddb
+                      initialDelaySeconds: 60
+                      periodSeconds: 10
+                      timeoutSeconds: 5
                 volumes:
                   - name: postgres-storage
                     persistentVolumeClaim:
@@ -163,9 +176,9 @@ jobs:
             namespace: ${{ env.NAMESPACE }}
           type: Opaque
           stringData:
-            POSTGRES_DB: accountdb
-            POSTGRES_USER: ${{ env.DB_USERNAME }}
-            POSTGRES_PASSWORD: ${{ env.DB_PASSWORD }}
+            database-name: accountdb
+            database-user: ${{ env.DB_USERNAME }}
+            database-password: ${{ env.DB_PASSWORD }}
           ---
           apiVersion: v1
           kind: PersistentVolumeClaim
@@ -177,7 +190,7 @@ jobs:
               - ReadWriteOnce
             resources:
               requests:
-                storage: 5Gi
+                storage: 1Gi
           ---
           apiVersion: apps/v1
           kind: Deployment
@@ -191,35 +204,37 @@ jobs:
             selector:
               matchLabels:
                 app: creditcard-account-db
+            strategy:
+              type: Recreate
             template:
               metadata:
                 labels:
                   app: creditcard-account-db
               spec:
                 containers:
-                  - name: postgres
-                    image: postgres:15
+                  - name: postgresql
+                    image: bitnami/postgresql:15
                     ports:
                       - containerPort: 5432
                     env:
-                      - name: POSTGRES_DB
+                      - name: POSTGRESQL_DATABASE
                         valueFrom:
                           secretKeyRef:
                             name: creditcard-account-db-secret
-                            key: POSTGRES_DB
-                      - name: POSTGRES_USER
+                            key: database-name
+                      - name: POSTGRESQL_USERNAME
                         valueFrom:
                           secretKeyRef:
                             name: creditcard-account-db-secret
-                            key: POSTGRES_USER
-                      - name: POSTGRES_PASSWORD
+                            key: database-user
+                      - name: POSTGRESQL_PASSWORD
                         valueFrom:
                           secretKeyRef:
                             name: creditcard-account-db-secret
-                            key: POSTGRES_PASSWORD
+                            key: database-password
                     volumeMounts:
                       - name: postgres-storage
-                        mountPath: /var/lib/postgresql/data
+                        mountPath: /bitnami/postgresql
                     resources:
                       requests:
                         memory: "256Mi"
@@ -227,22 +242,24 @@ jobs:
                       limits:
                         memory: "512Mi"
                         cpu: "500m"
-                    livenessProbe:
-                      exec:
-                        command:
-                          - pg_isready
-                          - -U
-                          - postgres
-                      initialDelaySeconds: 30
-                      periodSeconds: 10
                     readinessProbe:
                       exec:
                         command:
-                          - pg_isready
-                          - -U
-                          - postgres
-                      initialDelaySeconds: 5
-                      periodSeconds: 5
+                          - /bin/sh
+                          - -c
+                          - pg_isready -U ${{ env.DB_USERNAME }} -d accountdb
+                      initialDelaySeconds: 30
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                    livenessProbe:
+                      exec:
+                        command:
+                          - /bin/sh
+                          - -c
+                          - pg_isready -U ${{ env.DB_USERNAME }} -d accountdb
+                      initialDelaySeconds: 60
+                      periodSeconds: 10
+                      timeoutSeconds: 5
                 volumes:
                   - name: postgres-storage
                     persistentVolumeClaim:
@@ -274,9 +291,9 @@ jobs:
             namespace: ${{ env.NAMESPACE }}
           type: Opaque
           stringData:
-            POSTGRES_DB: statementdb
-            POSTGRES_USER: ${{ env.DB_USERNAME }}
-            POSTGRES_PASSWORD: ${{ env.DB_PASSWORD }}
+            database-name: statementdb
+            database-user: ${{ env.DB_USERNAME }}
+            database-password: ${{ env.DB_PASSWORD }}
           ---
           apiVersion: v1
           kind: PersistentVolumeClaim
@@ -288,7 +305,7 @@ jobs:
               - ReadWriteOnce
             resources:
               requests:
-                storage: 5Gi
+                storage: 1Gi
           ---
           apiVersion: apps/v1
           kind: Deployment
@@ -302,35 +319,37 @@ jobs:
             selector:
               matchLabels:
                 app: creditcard-statement-db
+            strategy:
+              type: Recreate
             template:
               metadata:
                 labels:
                   app: creditcard-statement-db
               spec:
                 containers:
-                  - name: postgres
-                    image: postgres:15
+                  - name: postgresql
+                    image: bitnami/postgresql:15
                     ports:
                       - containerPort: 5432
                     env:
-                      - name: POSTGRES_DB
+                      - name: POSTGRESQL_DATABASE
                         valueFrom:
                           secretKeyRef:
                             name: creditcard-statement-db-secret
-                            key: POSTGRES_DB
-                      - name: POSTGRES_USER
+                            key: database-name
+                      - name: POSTGRESQL_USERNAME
                         valueFrom:
                           secretKeyRef:
                             name: creditcard-statement-db-secret
-                            key: POSTGRES_USER
-                      - name: POSTGRES_PASSWORD
+                            key: database-user
+                      - name: POSTGRESQL_PASSWORD
                         valueFrom:
                           secretKeyRef:
                             name: creditcard-statement-db-secret
-                            key: POSTGRES_PASSWORD
+                            key: database-password
                     volumeMounts:
                       - name: postgres-storage
-                        mountPath: /var/lib/postgresql/data
+                        mountPath: /bitnami/postgresql
                     resources:
                       requests:
                         memory: "256Mi"
@@ -338,22 +357,24 @@ jobs:
                       limits:
                         memory: "512Mi"
                         cpu: "500m"
-                    livenessProbe:
-                      exec:
-                        command:
-                          - pg_isready
-                          - -U
-                          - postgres
-                      initialDelaySeconds: 30
-                      periodSeconds: 10
                     readinessProbe:
                       exec:
                         command:
-                          - pg_isready
-                          - -U
-                          - postgres
-                      initialDelaySeconds: 5
-                      periodSeconds: 5
+                          - /bin/sh
+                          - -c
+                          - pg_isready -U ${{ env.DB_USERNAME }} -d statementdb
+                      initialDelaySeconds: 30
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                    livenessProbe:
+                      exec:
+                        command:
+                          - /bin/sh
+                          - -c
+                          - pg_isready -U ${{ env.DB_USERNAME }} -d statementdb
+                      initialDelaySeconds: 60
+                      periodSeconds: 10
+                      timeoutSeconds: 5
                 volumes:
                   - name: postgres-storage
                     persistentVolumeClaim:
@@ -385,9 +406,9 @@ jobs:
             namespace: ${{ env.NAMESPACE }}
           type: Opaque
           stringData:
-            POSTGRES_DB: paymentdb
-            POSTGRES_USER: ${{ env.DB_USERNAME }}
-            POSTGRES_PASSWORD: ${{ env.DB_PASSWORD }}
+            database-name: paymentdb
+            database-user: ${{ env.DB_USERNAME }}
+            database-password: ${{ env.DB_PASSWORD }}
           ---
           apiVersion: v1
           kind: PersistentVolumeClaim
@@ -399,7 +420,7 @@ jobs:
               - ReadWriteOnce
             resources:
               requests:
-                storage: 5Gi
+                storage: 1Gi
           ---
           apiVersion: apps/v1
           kind: Deployment
@@ -413,35 +434,37 @@ jobs:
             selector:
               matchLabels:
                 app: creditcard-payment-db
+            strategy:
+              type: Recreate
             template:
               metadata:
                 labels:
                   app: creditcard-payment-db
               spec:
                 containers:
-                  - name: postgres
-                    image: postgres:15
+                  - name: postgresql
+                    image: bitnami/postgresql:15
                     ports:
                       - containerPort: 5432
                     env:
-                      - name: POSTGRES_DB
+                      - name: POSTGRESQL_DATABASE
                         valueFrom:
                           secretKeyRef:
                             name: creditcard-payment-db-secret
-                            key: POSTGRES_DB
-                      - name: POSTGRES_USER
+                            key: database-name
+                      - name: POSTGRESQL_USERNAME
                         valueFrom:
                           secretKeyRef:
                             name: creditcard-payment-db-secret
-                            key: POSTGRES_USER
-                      - name: POSTGRES_PASSWORD
+                            key: database-user
+                      - name: POSTGRESQL_PASSWORD
                         valueFrom:
                           secretKeyRef:
                             name: creditcard-payment-db-secret
-                            key: POSTGRES_PASSWORD
+                            key: database-password
                     volumeMounts:
                       - name: postgres-storage
-                        mountPath: /var/lib/postgresql/data
+                        mountPath: /bitnami/postgresql
                     resources:
                       requests:
                         memory: "256Mi"
@@ -449,22 +472,24 @@ jobs:
                       limits:
                         memory: "512Mi"
                         cpu: "500m"
-                    livenessProbe:
-                      exec:
-                        command:
-                          - pg_isready
-                          - -U
-                          - postgres
-                      initialDelaySeconds: 30
-                      periodSeconds: 10
                     readinessProbe:
                       exec:
                         command:
-                          - pg_isready
-                          - -U
-                          - postgres
-                      initialDelaySeconds: 5
-                      periodSeconds: 5
+                          - /bin/sh
+                          - -c
+                          - pg_isready -U ${{ env.DB_USERNAME }} -d paymentdb
+                      initialDelaySeconds: 30
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                    livenessProbe:
+                      exec:
+                        command:
+                          - /bin/sh
+                          - -c
+                          - pg_isready -U ${{ env.DB_USERNAME }} -d paymentdb
+                      initialDelaySeconds: 60
+                      periodSeconds: 10
+                      timeoutSeconds: 5
                 volumes:
                   - name: postgres-storage
                     persistentVolumeClaim:
@@ -485,46 +510,86 @@ jobs:
           EOF
           echo "✓ Payment database deployed"
 
+      - name: Check PVC status
+        run: |
+          echo "=== PVC Status ==="
+          oc get pvc -n ${{ env.NAMESPACE }}
+          echo ""
+          echo "Waiting 30s for PVCs to bind..."
+          sleep 30
+          oc get pvc -n ${{ env.NAMESPACE }}
+
       - name: Wait for databases to be ready
         run: |
-          echo "Waiting for databases to be ready..."
-          oc rollout status deployment/creditcard-card-db -n ${{ env.NAMESPACE }} --timeout=180s
-          oc rollout status deployment/creditcard-account-db -n ${{ env.NAMESPACE }} --timeout=180s
-          oc rollout status deployment/creditcard-statement-db -n ${{ env.NAMESPACE }} --timeout=180s
-          oc rollout status deployment/creditcard-payment-db -n ${{ env.NAMESPACE }} --timeout=180s
+          echo "Waiting for databases to be ready (timeout: 5 minutes each)..."
+          for db in card account statement payment; do
+            echo "Waiting for creditcard-${db}-db..."
+            oc rollout status deployment/creditcard-${db}-db -n ${{ env.NAMESPACE }} --timeout=300s || {
+              echo "Timeout waiting for creditcard-${db}-db. Checking pod status..."
+              oc get pods -l app=creditcard-${db}-db -n ${{ env.NAMESPACE }}
+              oc describe pod -l app=creditcard-${db}-db -n ${{ env.NAMESPACE }} | tail -30
+            }
+          done
 
       - name: Get database info
         run: |
           echo "=== Database Deployments ==="
-          oc get deployments -l app -n ${{ env.NAMESPACE }} | grep db
+          oc get deployments -n ${{ env.NAMESPACE }} | grep db
           echo ""
           echo "=== Database Services ==="
           oc get services -n ${{ env.NAMESPACE }} | grep db
           echo ""
           echo "=== Database Pods ==="
           oc get pods -n ${{ env.NAMESPACE }} | grep db
-          echo ""
-          echo "=== Connection Info ==="
-          echo "Card DB:      creditcard-card-db:5432/carddb"
-          echo "Account DB:   creditcard-account-db:5432/accountdb"
-          echo "Statement DB: creditcard-statement-db:5432/statementdb"
-          echo "Payment DB:   creditcard-payment-db:5432/paymentdb"
 
       - name: Deployment Summary
         run: |
           echo "## PostgreSQL Databases Deployed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Database | Service Name | Database Name | Port |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|--------------|---------------|------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Card | creditcard-card-db | carddb | 5432 |" >> $GITHUB_STEP_SUMMARY
-          echo "| Account | creditcard-account-db | accountdb | 5432 |" >> $GITHUB_STEP_SUMMARY
-          echo "| Statement | creditcard-statement-db | statementdb | 5432 |" >> $GITHUB_STEP_SUMMARY
-          echo "| Payment | creditcard-payment-db | paymentdb | 5432 |" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** bitnami/postgresql:15 (OpenShift compatible)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Connection String Format" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "jdbc:postgresql://<service-name>:5432/<database-name>" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "| Database | Service Name | Database Name | Port | User |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------------|---------------|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Card | creditcard-card-db | carddb | 5432 | ${{ env.DB_USERNAME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Account | creditcard-account-db | accountdb | 5432 | ${{ env.DB_USERNAME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Statement | creditcard-statement-db | statementdb | 5432 | ${{ env.DB_USERNAME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Payment | creditcard-payment-db | paymentdb | 5432 | ${{ env.DB_USERNAME }} |" >> $GITHUB_STEP_SUMMARY
+
+  status-databases:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.action == 'status' }}
+    
+    steps:
+      - name: Install OpenShift CLI
+        run: |
+          curl -sLO https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz
+          tar -xzf openshift-client-linux.tar.gz
+          sudo mv oc kubectl /usr/local/bin/
+
+      - name: Login to OpenShift
+        run: |
+          oc login --token=${{ env.OPENSHIFT_TOKEN }} --server=${{ env.OPENSHIFT_SERVER }} --insecure-skip-tls-verify=true
+          oc project ${{ env.NAMESPACE }}
+
+      - name: Check status
+        run: |
+          echo "=== PVC Status ==="
+          oc get pvc -n ${{ env.NAMESPACE }}
+          echo ""
+          echo "=== Deployments ==="
+          oc get deployments -n ${{ env.NAMESPACE }}
+          echo ""
+          echo "=== Pods ==="
+          oc get pods -n ${{ env.NAMESPACE }} -o wide
+          echo ""
+          echo "=== Services ==="
+          oc get services -n ${{ env.NAMESPACE }}
+          echo ""
+          for db in card account statement payment; do
+            echo "=== creditcard-${db}-db Pod Details ==="
+            oc describe pod -l app=creditcard-${db}-db -n ${{ env.NAMESPACE }} | grep -A 20 "Events:" || echo "No events"
+            echo ""
+          done
 
   delete-databases:
     runs-on: ubuntu-latest
